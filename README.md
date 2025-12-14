@@ -76,4 +76,6 @@ systemctl start|stop wg-backup-bot.service
 
 شروع/توقف دستی بکاپ خودکار:
 
+```bash
 systemctl start|stop wg-backup.timer
+```
