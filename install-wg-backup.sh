@@ -1,15 +1,23 @@
-cat > install-wg-backup.sh <<'EOF'
 #!/bin/bash
-set -e
+set -euo pipefail
 
 INSTALL_DIR="/opt/wg-backup"
 SERVICE_FILE="/etc/systemd/system/wg-backup.service"
 TIMER_FILE="/etc/systemd/system/wg-backup.timer"
+LOG_FILE="/var/log/wg_backup_installer.log"
 
 echo "======================================"
 echo " WireGuard Telegram Backup Installer"
 echo "======================================"
 echo
+
+# -----------------------
+# Check root
+# -----------------------
+if [[ $EUID -ne 0 ]]; then
+    echo "[!] Please run as root"
+    exit 1
+fi
 
 # -----------------------
 # User Input
@@ -27,7 +35,9 @@ echo "[+] Installing dependencies..."
 apt update -y
 apt install -y python3 python3-pip openssl
 
-pip3 install python-telegram-bot==13.15
+if ! python3 -c "import telegram" &>/dev/null; then
+    pip3 install python-telegram-bot==13.15
+fi
 
 # -----------------------
 # Create directories
@@ -54,6 +64,7 @@ echo "[+] Creating backup script..."
 cat > "$INSTALL_DIR/wg_backup.py" <<'PY'
 #!/usr/bin/env python3
 import os, tarfile, time, subprocess, logging
+from telegram import Bot
 
 CONFIG_FILE="/opt/wg-backup/config.env"
 TMP_DIR="/tmp"
@@ -75,8 +86,6 @@ def load_config():
     return cfg
 
 cfg=load_config()
-
-from telegram import Bot
 bot=Bot(token=cfg["BOT_TOKEN"])
 
 logging.basicConfig(
@@ -85,36 +94,40 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-ts=time.strftime("%Y%m%d_%H%M%S")
-tar_path=f"{TMP_DIR}/wg_backup_{ts}.tar"
-enc_path=f"{tar_path}.enc"
+try:
+    ts=time.strftime("%Y%m%d_%H%M%S")
+    tar_path=f"{TMP_DIR}/wg_backup_{ts}.tar"
+    enc_path=f"{tar_path}.enc"
 
-logging.info("Backup started")
+    logging.info("Backup started")
 
-with tarfile.open(tar_path,"w") as tar:
-    for p in FILES_TO_BACKUP:
-        if os.path.exists(p):
-            tar.add(p,arcname=p.lstrip("/"))
+    with tarfile.open(tar_path,"w") as tar:
+        for p in FILES_TO_BACKUP:
+            if os.path.exists(p):
+                tar.add(p,arcname=p.lstrip("/"))
 
-subprocess.check_call([
-    "openssl","enc","-aes-256-cbc","-salt",
-    "-in",tar_path,
-    "-out",enc_path,
-    "-pass",f"pass:{cfg['BACKUP_PASSWORD']}"
-])
+    subprocess.check_call([
+        "openssl","enc","-aes-256-cbc","-salt",
+        "-in",tar_path,
+        "-out",enc_path,
+        "-pass",f"pass:{cfg['BACKUP_PASSWORD']}"
+    ])
 
-os.remove(tar_path)
+    os.remove(tar_path)
 
-for cid in cfg["CHAT_ID"].split(","):
-    with open(enc_path,"rb") as f:
-        bot.send_document(
-            chat_id=cid,
-            document=f,
-            caption="🔐 WireGuard Encrypted Backup"
-        )
+    for cid in cfg["CHAT_ID"].split(","):
+        with open(enc_path,"rb") as f:
+            bot.send_document(
+                chat_id=cid,
+                document=f,
+                caption="🔐 WireGuard Encrypted Backup"
+            )
 
-os.remove(enc_path)
-logging.info("Backup completed successfully")
+    os.remove(enc_path)
+    logging.info("Backup completed successfully")
+except Exception as e:
+    logging.exception("Backup failed")
+    raise
 PY
 
 chmod +x "$INSTALL_DIR/wg_backup.py"
@@ -137,7 +150,7 @@ SRV
 # -----------------------
 # Create systemd timer
 # -----------------------
-echo "[+] Creating systemd timer (12 hours)..."
+echo "[+] Creating systemd timer (every 12 hours)..."
 cat > "$TIMER_FILE" <<TMR
 [Unit]
 Description=Run WireGuard Backup every 12 hours
@@ -165,4 +178,3 @@ echo "======================================"
 echo " Installation completed successfully!"
 echo " Backups will be sent every 12 hours"
 echo "======================================"
-EOF
