@@ -1,0 +1,10 @@
+[Unit]
+Description=Run WireGuard Backup every 12 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
