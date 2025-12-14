@@ -5,6 +5,7 @@ INSTALL_DIR="/opt/wg-backup"
 SERVICE_FILE="/etc/systemd/system/wg-backup.service"
 TIMER_FILE="/etc/systemd/system/wg-backup.timer"
 LOG_FILE="/var/log/wg_backup_installer.log"
+BACKUP_SCRIPT="$INSTALL_DIR/wg_backup.py"
 
 echo "======================================"
 echo " WireGuard Telegram Backup Installer"
@@ -20,48 +21,75 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # -----------------------
-# User Input
+# Check command argument
 # -----------------------
-read -p "Enter Telegram Bot Token: " BOT_TOKEN
-read -p "Enter Telegram Chat ID(s) (comma separated): " CHAT_ID
-read -s -p "Enter Backup Encryption Password: " BACKUP_PASSWORD
-echo
-echo
-
-# -----------------------
-# Install Dependencies
-# -----------------------
-echo "[+] Installing dependencies..."
-apt update -y
-apt install -y python3 python3-pip openssl
-
-if ! python3 -c "import telegram" &>/dev/null; then
-    pip3 install python-telegram-bot==13.15
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 {install|backup}"
+    exit 1
 fi
 
-# -----------------------
-# Create directories
-# -----------------------
-echo "[+] Creating directories..."
-mkdir -p "$INSTALL_DIR"
+ACTION="$1"
 
 # -----------------------
-# Write config
+# Backup function
 # -----------------------
-echo "[+] Writing configuration..."
-cat > "$INSTALL_DIR/config.env" <<CFG
+run_backup() {
+    if [[ ! -f "$BACKUP_SCRIPT" ]]; then
+        echo "[!] Backup script not found: $BACKUP_SCRIPT"
+        exit 1
+    fi
+    echo "[+] Running backup..."
+    /usr/bin/python3 "$BACKUP_SCRIPT"
+    echo "[+] Backup completed!"
+}
+
+# -----------------------
+# Install function
+# -----------------------
+install_backup() {
+    # -----------------------
+    # User Input
+    # -----------------------
+    read -p "Enter Telegram Bot Token: " BOT_TOKEN
+    read -p "Enter Telegram Chat ID(s) (comma separated): " CHAT_ID
+    read -s -p "Enter Backup Encryption Password: " BACKUP_PASSWORD
+    echo
+    echo
+
+    # -----------------------
+    # Install Dependencies
+    # -----------------------
+    echo "[+] Installing dependencies..."
+    apt update -y
+    apt install -y python3 python3-pip openssl
+
+    if ! python3 -c "import telegram" &>/dev/null; then
+        pip3 install python-telegram-bot==13.15
+    fi
+
+    # -----------------------
+    # Create directories
+    # -----------------------
+    echo "[+] Creating directories..."
+    mkdir -p "$INSTALL_DIR"
+
+    # -----------------------
+    # Write config
+    # -----------------------
+    echo "[+] Writing configuration..."
+    cat > "$INSTALL_DIR/config.env" <<CFG
 BOT_TOKEN=$BOT_TOKEN
 CHAT_ID=$CHAT_ID
 BACKUP_PASSWORD=$BACKUP_PASSWORD
 CFG
 
-chmod 600 "$INSTALL_DIR/config.env"
+    chmod 600 "$INSTALL_DIR/config.env"
 
-# -----------------------
-# Create backup script
-# -----------------------
-echo "[+] Creating backup script..."
-cat > "$INSTALL_DIR/wg_backup.py" <<'PY'
+    # -----------------------
+    # Create backup script
+    # -----------------------
+    echo "[+] Creating backup script..."
+    cat > "$BACKUP_SCRIPT" <<'PY'
 #!/usr/bin/env python3
 import os, tarfile, time, subprocess, logging
 from telegram import Bot
@@ -130,13 +158,13 @@ except Exception as e:
     raise
 PY
 
-chmod +x "$INSTALL_DIR/wg_backup.py"
+    chmod +x "$BACKUP_SCRIPT"
 
-# -----------------------
-# Create systemd service
-# -----------------------
-echo "[+] Creating systemd service..."
-cat > "$SERVICE_FILE" <<SRV
+    # -----------------------
+    # Create systemd service
+    # -----------------------
+    echo "[+] Creating systemd service..."
+    cat > "$SERVICE_FILE" <<SRV
 [Unit]
 Description=WireGuard Telegram Backup
 After=network-online.target
@@ -147,11 +175,11 @@ Type=oneshot
 ExecStart=/usr/bin/python3 /opt/wg-backup/wg_backup.py
 SRV
 
-# -----------------------
-# Create systemd timer
-# -----------------------
-echo "[+] Creating systemd timer (every 12 hours)..."
-cat > "$TIMER_FILE" <<TMR
+    # -----------------------
+    # Create systemd timer
+    # -----------------------
+    echo "[+] Creating systemd timer (every 12 hours)..."
+    cat > "$TIMER_FILE" <<TMR
 [Unit]
 Description=Run WireGuard Backup every 12 hours
 
@@ -164,17 +192,35 @@ Persistent=true
 WantedBy=timers.target
 TMR
 
-# -----------------------
-# Enable timer
-# -----------------------
-echo "[+] Enabling backup timer..."
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable wg-backup.timer
-systemctl start wg-backup.timer
+    # -----------------------
+    # Enable timer
+    # -----------------------
+    echo "[+] Enabling backup timer..."
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    systemctl enable wg-backup.timer
+    systemctl start wg-backup.timer
 
-echo
-echo "======================================"
-echo " Installation completed successfully!"
-echo " Backups will be sent every 12 hours"
-echo "======================================"
+    echo
+    echo "======================================"
+    echo " Installation completed successfully!"
+    echo " Backups will be sent every 12 hours"
+    echo "======================================"
+}
+
+# -----------------------
+# Main
+# -----------------------
+case "$ACTION" in
+    install)
+        install_backup
+        ;;
+    backup)
+        run_backup
+        ;;
+    *)
+        echo "Invalid option: $ACTION"
+        echo "Usage: $0 {install|backup}"
+        exit 1
+        ;;
+esac
