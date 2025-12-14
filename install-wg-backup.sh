@@ -61,7 +61,7 @@ install_backup() {
     # -----------------------
     echo "[+] Installing dependencies..."
     apt update -y
-    apt install -y python3 python3-pip openssl
+    apt install -y python3 python3-pip openssl curl
 
     if ! python3 -c "import telegram" &>/dev/null; then
         pip3 install python-telegram-bot==13.15
