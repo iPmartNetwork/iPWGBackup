@@ -4,8 +4,8 @@ set -euo pipefail
 INSTALL_DIR="/opt/wg-backup"
 SERVICE_FILE="/etc/systemd/system/wg-backup.service"
 TIMER_FILE="/etc/systemd/system/wg-backup.timer"
+BOT_SCRIPT="$INSTALL_DIR/wg_backup.py"
 LOG_FILE="/var/log/wg_backup_installer.log"
-BACKUP_SCRIPT="$INSTALL_DIR/wg_backup.py"
 
 echo "======================================"
 echo " WireGuard Telegram Backup Installer"
@@ -21,78 +21,48 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # -----------------------
-# Check command argument
+# Install dependencies
 # -----------------------
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 {install|backup}"
-    exit 1
+echo "[+] Installing dependencies..."
+apt update -y
+apt install -y python3 python3-pip openssl curl
+
+if ! python3 -c "import telegram" &>/dev/null; then
+    pip3 install python-telegram-bot==13.15
 fi
 
-ACTION="$1"
+# -----------------------
+# Create directories
+# -----------------------
+echo "[+] Creating directories..."
+mkdir -p "$INSTALL_DIR"
 
 # -----------------------
-# Backup function
+# User Input
 # -----------------------
-run_backup() {
-    if [[ ! -f "$BACKUP_SCRIPT" ]]; then
-        echo "[!] Backup script not found: $BACKUP_SCRIPT"
-        exit 1
-    fi
-    echo "[+] Running backup..."
-    /usr/bin/python3 "$BACKUP_SCRIPT"
-    echo "[+] Backup completed!"
-}
+read -p "Enter Telegram Bot Token: " BOT_TOKEN
+read -p "Enter Telegram Chat ID(s) (comma separated): " CHAT_ID
+echo
 
 # -----------------------
-# Install function
+# Write configuration
 # -----------------------
-install_backup() {
-    # -----------------------
-    # User Input
-    # -----------------------
-    read -p "Enter Telegram Bot Token: " BOT_TOKEN
-    read -p "Enter Telegram Chat ID(s) (comma separated): " CHAT_ID
-    read -s -p "Enter Backup Encryption Password: " BACKUP_PASSWORD
-    echo
-    echo
-
-    # -----------------------
-    # Install Dependencies
-    # -----------------------
-    echo "[+] Installing dependencies..."
-    apt update -y
-    apt install -y python3 python3-pip openssl curl
-
-    if ! python3 -c "import telegram" &>/dev/null; then
-        pip3 install python-telegram-bot==13.15
-    fi
-
-    # -----------------------
-    # Create directories
-    # -----------------------
-    echo "[+] Creating directories..."
-    mkdir -p "$INSTALL_DIR"
-
-    # -----------------------
-    # Write config
-    # -----------------------
-    echo "[+] Writing configuration..."
-    cat > "$INSTALL_DIR/config.env" <<CFG
+cat > "$INSTALL_DIR/config.env" <<CFG
 BOT_TOKEN=$BOT_TOKEN
 CHAT_ID=$CHAT_ID
-BACKUP_PASSWORD=$BACKUP_PASSWORD
 CFG
 
-    chmod 600 "$INSTALL_DIR/config.env"
+chmod 600 "$INSTALL_DIR/config.env"
 
-    # -----------------------
-    # Create backup script
-    # -----------------------
-    echo "[+] Creating backup script..."
-    cat > "$BACKUP_SCRIPT" <<'PY'
+# -----------------------
+# Create Python backup script
+# -----------------------
+cat > "$BOT_SCRIPT" <<'PY'
 #!/usr/bin/env python3
-import os, tarfile, time, subprocess, logging
-from telegram import Bot
+import os, tarfile, time, logging
+from telegram import Bot, Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
+import threading
 
 CONFIG_FILE="/opt/wg-backup/config.env"
 TMP_DIR="/tmp"
@@ -122,64 +92,72 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-try:
-    ts=time.strftime("%Y%m%d_%H%M%S")
-    tar_path=f"{TMP_DIR}/wg_backup_{ts}.tar"
-    enc_path=f"{tar_path}.enc"
+def run_backup(chat_ids=None):
+    try:
+        ts=time.strftime("%Y%m%d_%H%M%S")
+        tar_path=f"{TMP_DIR}/wg_backup_{ts}.tar"
 
-    logging.info("Backup started")
+        logging.info("Backup started")
 
-    with tarfile.open(tar_path,"w") as tar:
-        for p in FILES_TO_BACKUP:
-            if os.path.exists(p):
-                tar.add(p,arcname=p.lstrip("/"))
+        with tarfile.open(tar_path,"w") as tar:
+            for p in FILES_TO_BACKUP:
+                if os.path.exists(p):
+                    tar.add(p,arcname=p.lstrip("/"))
 
-    subprocess.check_call([
-        "openssl","enc","-aes-256-cbc","-salt",
-        "-in",tar_path,
-        "-out",enc_path,
-        "-pass",f"pass:{cfg['BACKUP_PASSWORD']}"
-    ])
+        recipients = chat_ids if chat_ids else cfg["CHAT_ID"].split(",")
+        for cid in recipients:
+            with open(tar_path,"rb") as f:
+                bot.send_document(
+                    chat_id=cid,
+                    document=f,
+                    caption="📦 WireGuard Backup"
+                )
 
-    os.remove(tar_path)
+        os.remove(tar_path)
+        logging.info("Backup completed successfully")
+    except Exception as e:
+        logging.exception("Backup failed")
+        raise
 
-    for cid in cfg["CHAT_ID"].split(","):
-        with open(enc_path,"rb") as f:
-            bot.send_document(
-                chat_id=cid,
-                document=f,
-                caption="🔐 WireGuard Encrypted Backup"
-            )
+def backup_command(update: Update, context: CallbackContext):
+    chat_id = str(update.effective_chat.id)
+    update.message.reply_text("⏳ Backup is starting...")
+    threading.Thread(target=run_backup, args=([chat_id],)).start()
+    update.message.reply_text("✅ Backup started. Check chat for the file when done.")
 
-    os.remove(enc_path)
-    logging.info("Backup completed successfully")
-except Exception as e:
-    logging.exception("Backup failed")
-    raise
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "manual":
+        run_backup()
+    else:
+        updater = Updater(token=cfg["BOT_TOKEN"], use_context=True)
+        dp = updater.dispatcher
+        dp.add_handler(CommandHandler("backup", backup_command))
+        logging.info("Telegram bot started, waiting for /backup command...")
+        updater.start_polling()
+        updater.idle()
 PY
 
-    chmod +x "$BACKUP_SCRIPT"
+chmod +x "$BOT_SCRIPT"
 
-    # -----------------------
-    # Create systemd service
-    # -----------------------
-    echo "[+] Creating systemd service..."
-    cat > "$SERVICE_FILE" <<SRV
+# -----------------------
+# Create systemd service
+# -----------------------
+cat > "$SERVICE_FILE" <<SRV
 [Unit]
-Description=WireGuard Telegram Backup
+Description=WireGuard Telegram Backup (automatic)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/wg-backup/wg_backup.py
+ExecStart=/usr/bin/python3 /opt/wg-backup/wg_backup.py manual
 SRV
 
-    # -----------------------
-    # Create systemd timer
-    # -----------------------
-    echo "[+] Creating systemd timer (every 12 hours)..."
-    cat > "$TIMER_FILE" <<TMR
+# -----------------------
+# Create systemd timer
+# -----------------------
+cat > "$TIMER_FILE" <<TMR
 [Unit]
 Description=Run WireGuard Backup every 12 hours
 
@@ -192,35 +170,17 @@ Persistent=true
 WantedBy=timers.target
 TMR
 
-    # -----------------------
-    # Enable timer
-    # -----------------------
-    echo "[+] Enabling backup timer..."
-    systemctl daemon-reexec
-    systemctl daemon-reload
-    systemctl enable wg-backup.timer
-    systemctl start wg-backup.timer
-
-    echo
-    echo "======================================"
-    echo " Installation completed successfully!"
-    echo " Backups will be sent every 12 hours"
-    echo "======================================"
-}
-
 # -----------------------
-# Main
+# Enable timer
 # -----------------------
-case "$ACTION" in
-    install)
-        install_backup
-        ;;
-    backup)
-        run_backup
-        ;;
-    *)
-        echo "Invalid option: $ACTION"
-        echo "Usage: $0 {install|backup}"
-        exit 1
-        ;;
-esac
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable wg-backup.timer
+systemctl start wg-backup.timer
+
+echo
+echo "======================================"
+echo " Installation completed successfully!"
+echo " Backups will be sent every 12 hours automatically"
+echo " You can also trigger a manual backup via /backup command in your Telegram bot"
+echo "======================================"
